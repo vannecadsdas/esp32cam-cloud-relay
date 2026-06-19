@@ -56,7 +56,7 @@ wssCamera.on('connection', (ws) => {
         } else {
             // Nhận lệnh text từ camera (ví dụ báo cáo trạng thái)
             const textMsg = message.toString().trim();
-            console.log('[Camera -> Server]:', textMsg);
+            console.log('[Camera -> Server] Nhận tin nhắn text:', textMsg);
             broadcastToClients(textMsg);
         }
     });
@@ -97,11 +97,26 @@ wssClients.on('connection', (ws) => {
 
     ws.on('message', (message) => {
         const command = message.toString().trim();
-        console.log('[Client -> Camera]:', command);
+        console.log(`[Client -> Server] Nhận lệnh '${command}' từ Client`);
 
-        // Chuyển tiếp lệnh từ Client trực tiếp tới ESP32-CAM (readyState 1 là OPEN)
-        if (cameraSocket && cameraSocket.readyState === 1) {
-            cameraSocket.send(command);
+        if (!cameraSocket) {
+            console.log(`[Server -> Camera] KHÔNG THỂ chuyển tiếp lệnh '${command}': cameraSocket đang NULL (Camera chưa kết nối hoặc mất kết nối).`);
+            return;
+        }
+
+        console.log(`[Server -> Camera] Trạng thái cameraSocket.readyState: ${cameraSocket.readyState} (1 là OPEN)`);
+        
+        if (cameraSocket.readyState === 1) {
+            console.log(`[Server -> Camera] Đang gửi lệnh '${command}' tới Camera...`);
+            cameraSocket.send(command, (err) => {
+                if (err) {
+                    console.error(`[Server -> Camera] Gửi lệnh '${command}' THẤT BẠI:`, err);
+                } else {
+                    console.log(`[Server -> Camera] Đã gửi lệnh '${command}' THÀNH CÔNG.`);
+                }
+            });
+        } else {
+            console.log(`[Server -> Camera] KHÔNG THỂ gửi lệnh '${command}': readyState của cameraSocket là ${cameraSocket.readyState} (không phải OPEN).`);
         }
     });
 
