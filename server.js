@@ -40,13 +40,15 @@ const clientSockets = new Set();
 // CAMERA WEBSOCKET  (/esp32cam)
 // ─────────────────────────────────────────────────────────────
 wssCamera.on('connection', (ws) => {
-    console.log('[CAM] ESP32-CAM kết nối mới!');
+    const connectedAt = Date.now();
+    console.log(`[CAM] ESP32-CAM kết nối mới! Time=${new Date(connectedAt).toLocaleTimeString('vi-VN')}`);
 
     // Đóng socket camera cũ nếu còn tồn tại
     if (cameraSocket && cameraSocket !== ws) {
         console.log('[CAM] Đóng socket camera cũ.');
         cameraSocket.terminate();
     }
+    ws._connectedAt = connectedAt;
 
     cameraSocket  = ws;
     cameraReady   = false;
@@ -69,7 +71,8 @@ wssCamera.on('connection', (ws) => {
         if (text === 'register_camera') {
             cameraReady   = true;
             cameraReadyAt = Date.now();
-            console.log('[CAM] Đã nhận register_camera. Camera ONLINE và sẵn sàng.');
+            const delayMs = ws._connectedAt ? cameraReadyAt - ws._connectedAt : 0;
+            console.log(`[CAM] register_camera nhận sau ${delayMs}ms kết nối. Camera ONLINE.`);
             broadcastToClients(JSON.stringify({ type: 'status', camera: 'online' }));
             return;
         }
@@ -80,11 +83,12 @@ wssCamera.on('connection', (ws) => {
     });
 
     ws.on('close', (code, reason) => {
-        console.log(`[CAM] ESP32-CAM ngắt kết nối. Code=${code}`);
+        const aliveMs = ws._connectedAt ? Date.now() - ws._connectedAt : -1;
+        const streamedMs = ws._streamStartAt ? Date.now() - ws._streamStartAt : -1;
+        console.log(`[CAM] NGẮT KẾT NỐI! Code=${code} | Sống được: ${aliveMs}ms | Streaming: ${ws._isStreaming ? `${streamedMs}ms` : 'chưa phát'} | Reason: ${reason || 'none'}`);
         if (cameraSocket === ws) {
             cameraSocket  = null;
             cameraReady   = false;
-            cameraReadyAt = 0;
         }
         broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
     });
@@ -94,7 +98,6 @@ wssCamera.on('connection', (ws) => {
         if (cameraSocket === ws) {
             cameraSocket  = null;
             cameraReady   = false;
-            cameraReadyAt = 0;
         }
     });
 });
@@ -130,14 +133,19 @@ wssClients.on('connection', (ws) => {
             return;
         }
 
-        // Gửi lệnh trực tiếp dưới dạng TEXT (không có \0)
-        // Firmware dùng: String message = String((char*)payload);
-        // → Tự dừng tại \0 nếu có, nhưng không cần thiết phải gắn thêm
+        // Ghi log thời điểm gửi start_stream để đo thời gian tới khi crash
+        if (command === 'start_stream') {
+            cameraSocket._isStreaming = true;
+            cameraSocket._streamStartAt = Date.now();
+            const readyMs = cameraSocket._connectedAt ? Date.now() - cameraSocket._connectedAt : 0;
+            console.log(`[Server → CAM] start_stream gửi sau ${readyMs}ms kể từ khi kết nối.`);
+        }
+
         cameraSocket.send(command, (err) => {
             if (err) {
                 console.error(`[Server → CAM] Gửi '${command}' THẤT BẠI:`, err.message);
             } else {
-                console.log(`[Server → CAM] Đã gửi '${command}' thành công.`);
+                console.log(`[Server → CAM] Đã gửi '${command}' OK.`);
             }
         });
     });
@@ -185,24 +193,20 @@ httpServer.on('upgrade', (req, socket, head) => {
     }
 });
 
-// ─── Heartbeat (Ping/Pong mỗi 30s) ───────────────────────────
+// ─── Heartbeat: CHỈ ping Browser, KHÔNG ping Camera ───────────
+// ArduinoWebSocketsClient trên ESP32 có thể crash khi nhận WS ping
+// từ server (cần cấp phát RAM cho pong frame → heap overflow)
+// ESP32 tự quản lý reconnect qua setReconnectInterval(5000)
 const heartbeat = setInterval(() => {
-    // Camera
-    if (cameraSocket) {
-        if (cameraSocket.isAlive === false) {
-            console.log('[Heartbeat] Camera không phản hồi pong → ngắt kết nối.');
-            cameraSocket.terminate();
-            cameraSocket  = null;
-            cameraReady   = false;
-            cameraReadyAt = 0;
-            broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
-        } else {
-            cameraSocket.isAlive = false;
-            cameraSocket.ping();
-        }
+    // KHÔNG ping camera
+    if (cameraSocket && cameraSocket.readyState !== 1) {
+        console.log('[Heartbeat] Camera socket không OPEN, dọn dẹp.');
+        cameraSocket = null;
+        cameraReady  = false;
+        broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
     }
 
-    // Browsers
+    // Chỉ ping Browser clients
     clientSockets.forEach((ws) => {
         if (ws.isAlive === false) {
             console.log('[Heartbeat] Browser không phản hồi pong → ngắt kết nối.');
@@ -213,7 +217,7 @@ const heartbeat = setInterval(() => {
             ws.ping();
         }
     });
-}, 30000);
+}, 25000);
 
 httpServer.on('close', () => clearInterval(heartbeat));
 
