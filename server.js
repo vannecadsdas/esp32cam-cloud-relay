@@ -1,3 +1,4 @@
+// Aether-Eye Cloud Relay Server v2.1 - Fix: null-terminator + no auto framesize change
 const http = require('http');
 const url = require('url');
 const { WebSocketServer } = require('ws');
