@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Giao diện giám sát camera ESP32-CAM chuyên nghiệp từ xa qua Internet và mạng LAN cục bộ. Tích hợp phát hiện chuyển động.">
+    <title>ESP32-CAM Surveillance Web Dashboard</title>
+    <!-- Google Fonts: Inter & Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Main Style Sheet -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="glow-bg"></div>
+    
+    <div class="dashboard-container">
+        <!-- HEADER SECTION -->
+        <header class="dashboard-header glass-panel">
+            <div class="logo-area">
+                <div class="logo-icon"><i class="fa-solid fa-shield-halved"></i></div>
+                <div>
+                    <h1>AETHER-EYE</h1>
+                    <p class="subtitle">ESP32-CAM Smart Surveillance System</p>
+                </div>
+            </div>
+            
+            <div class="connection-manager">
+                <!-- Toggle Mode: Local LAN vs Cloud WAN -->
+                <div class="mode-selector">
+                    <button id="btn-mode-local" class="mode-btn active" onclick="switchStreamMode('local')">
+                        <i class="fa-solid fa-wifi"></i> Cục bộ (LAN)
+                    </button>
+                    <button id="btn-mode-cloud" class="mode-btn" onclick="switchStreamMode('cloud')">
+                        <i class="fa-solid fa-cloud"></i> Từ xa (Cloud)
+                    </button>
+                </div>
+                
+                <!-- Input IP / WebSocket Domain -->
+                <div class="ip-input-group">
+                    <span class="input-prefix" id="connection-prefix">http://</span>
+                    <input type="text" id="ip-address" placeholder="192.168.1.15" value="192.168.1.15">
+                    <button id="btn-connect" class="action-btn connect-btn" onclick="toggleConnection()">
+                        <i class="fa-solid fa-play"></i> Kết nối
+                    </button>
+                </div>
+                
+                <!-- Status Dot -->
+                <div class="status-indicator">
+                    <span id="status-dot" class="dot disconnected"></span>
+                    <span id="status-text" class="status-label">Chưa kết nối</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN LAYOUT -->
+        <main class="dashboard-main">
+            <!-- LEFT COLUMN: VIDEO FEED -->
+            <section class="video-section glass-panel">
+                <div class="section-header">
+                    <h2><i class="fa-solid fa-video"></i> Luồng Trực Tiếp</h2>
+                    <div class="stream-info">
+                        <span id="stream-fps" class="badge">0 FPS</span>
+                        <span id="stream-res" class="badge">VGA</span>
+                        <span id="stream-source-badge" class="badge mode-badge">MOCK MODE</span>
+                    </div>
+                </div>
+                
+                <div class="video-container" id="video-container">
+                    <!-- Overlay Alarm for Motion Detection -->
+                    <div id="motion-overlay" class="motion-overlay">
+                        <div class="alert-box">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span>PHÁT HIỆN XÂM NHẬP</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Live Image Element -->
+                    <img id="camera-stream" src="" alt="Camera Live Feed" class="camera-stream" style="display:none;">
+                    
+                    <!-- Hidden Canvas for Motion Detection processing -->
+                    <canvas id="motion-canvas" class="hidden-canvas"></canvas>
+                    
+                    <!-- Mock Video Indicator (Canvas) when no device is connected -->
+                    <canvas id="mock-canvas" class="mock-canvas"></canvas>
+                    
+                    <!-- Loading / Connecting state overlay -->
+                    <div id="video-loader" class="video-loader">
+                        <div class="spinner"></div>
+                        <p id="loader-text">Đang kết nối camera...</p>
+                    </div>
+                </div>
+                
+                <!-- Quick controls beneath video -->
+                <div class="quick-controls">
+                    <button id="btn-capture" class="ctrl-btn main-action" onclick="takeSnapshot()">
+                        <i class="fa-solid fa-camera"></i> Chụp ảnh tĩnh
+                    </button>
+                    
+                    <button id="btn-flash" class="ctrl-btn" onclick="toggleFlash()">
+                        <i class="fa-solid fa-lightbulb"></i> Đèn trợ sáng
+                    </button>
+
+                    <button id="btn-fullscreen" class="ctrl-btn icon-only" onclick="toggleFullscreen()" title="Toàn màn hình">
+                        <i class="fa-solid fa-expand"></i>
+                    </button>
+                </div>
+            </section>
+
+            <!-- RIGHT COLUMN: CONFIG & SETTINGS -->
+            <section class="settings-section glass-panel">
+                <h2><i class="fa-solid fa-sliders"></i> Cấu Hình Camera</h2>
+                
+                <div class="settings-group">
+                    <h3>Cài Đặt Cảnh Báo</h3>
+                    
+                    <!-- Motion Detection Toggle -->
+                    <div class="setting-row">
+                        <div class="setting-info">
+                            <span class="setting-title">Phát hiện chuyển động</span>
+                            <span class="setting-desc">Tự động báo động và chụp ảnh</span>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="setting-motion" onchange="toggleMotionDetection()">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+
+                    <!-- Sensitivity Slider -->
+                    <div class="setting-row range-setting">
+                        <div class="range-header">
+                            <span class="setting-title">Độ nhạy chuyển động</span>
+                            <span id="val-sensitivity" class="range-val">50%</span>
+                        </div>
+                        <input type="range" id="setting-sensitivity" min="10" max="90" value="50" oninput="updateRangeLabel('sensitivity', this.value)">
+                    </div>
+                </div>
+
+                <div class="settings-group">
+                    <h3>Cấu Hình Hình Ảnh</h3>
+                    
+                    <!-- Resolution Dropdown -->
+                    <div class="setting-row">
+                        <span class="setting-title">Độ phân giải</span>
+                        <div class="select-wrapper">
+                            <select id="setting-resolution" onchange="changeResolution(this.value)">
+                                <option value="10">UXGA (1600x1200)</option>
+                                <option value="9">SXGA (1280x1024)</option>
+                                <option value="8">XGA (1024x768)</option>
+                                <option value="7">SVGA (800x600)</option>
+                                <option value="6" selected>VGA (640x480)</option>
+                                <option value="5">CIF (352x288)</option>
+                                <option value="4">QVGA (320x240)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Brightness Slider -->
+                    <div class="setting-row range-setting">
+                        <div class="range-header">
+                            <span class="setting-title">Độ sáng</span>
+                            <span id="val-brightness" class="range-val">0</span>
+                        </div>
+                        <input type="range" id="setting-brightness" min="-2" max="2" value="0" oninput="updateCamSetting('brightness', this.value)">
+                    </div>
+
+                    <!-- Contrast Slider -->
+                    <div class="setting-row range-setting">
+                        <div class="range-header">
+                            <span class="setting-title">Độ tương phản</span>
+                            <span id="val-contrast" class="range-val">0</span>
+                        </div>
+                        <input type="range" id="setting-contrast" min="-2" max="2" value="0" oninput="updateCamSetting('contrast', this.value)">
+                    </div>
+
+                    <!-- Saturation Slider -->
+                    <div class="setting-row range-setting">
+                        <div class="range-header">
+                            <span class="setting-title">Độ bão hòa màu</span>
+                            <span id="val-saturation" class="range-val">0</span>
+                        </div>
+                        <input type="range" id="setting-saturation" min="-2" max="2" value="0" oninput="updateCamSetting('saturation', this.value)">
+                    </div>
+                </div>
+
+                <div class="settings-group">
+                    <h3>Xoay & Lật Hình</h3>
+                    
+                    <div class="toggle-grid">
+                        <!-- V-Flip Toggle -->
+                        <div class="setting-row">
+                            <span class="setting-title">Lật dọc (V-Flip)</span>
+                            <label class="switch">
+                                <input type="checkbox" id="setting-vflip" onchange="updateCamSetting('vflip', this.checked ? '1' : '0')">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+
+                        <!-- H-Mirror Toggle -->
+                        <div class="setting-row">
+                            <span class="setting-title">Lật ngang (H-Mirror)</span>
+                            <label class="switch">
+                                <input type="checkbox" id="setting-hmirror" onchange="updateCamSetting('hmirror', this.checked ? '1' : '0')">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- PHOTO GALLERY SECTION -->
+        <section class="gallery-section glass-panel">
+            <div class="section-header">
+                <h2><i class="fa-solid fa-images"></i> Thư Viện Ảnh Đã Chụp (IndexedDB)</h2>
+                <div class="gallery-actions">
+                    <button class="gallery-btn clear-btn" onclick="clearGallery()">
+                        <i class="fa-solid fa-trash-can"></i> Xóa tất cả
+                    </button>
+                </div>
+            </div>
+            
+            <div id="gallery-grid" class="gallery-grid">
+                <!-- Gallery items will be injected here via Javascript -->
+                <div class="gallery-empty">
+                    <i class="fa-regular fa-image"></i>
+                    <p>Chưa có ảnh chụp nào trong thư viện.</p>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- LIGHTBOX OVERLAY FOR ENLARGING PHOTOS -->
+    <div id="lightbox" class="lightbox" onclick="closeLightbox()">
+        <span class="close-lightbox">&times;</span>
+        <img id="lightbox-img" class="lightbox-content" src="" alt="Enlarged snapshot">
+        <div id="lightbox-caption" class="lightbox-caption"></div>
+    </div>
+
+    <!-- Audio Element for Alarm Sound -->
+    <audio id="alarm-sound" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-84.wav" preload="auto"></audio>
+
+    <!-- Main JavaScript Logic -->
+    <script src="app.js?v=1.0.3"></script>
+</body>
+</html>
