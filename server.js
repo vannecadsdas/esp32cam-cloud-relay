@@ -1,196 +1,200 @@
-// Aether-Eye Cloud Relay Server v2.1 - Fix: null-terminator + no auto framesize change
+// =============================================================
+// Aether-Eye Cloud Relay Server v3.0
+// Viết lại hoàn toàn dựa trên phân tích firmware chính xác
+// =============================================================
+
 const http = require('http');
-const url = require('url');
+const url  = require('url');
 const { WebSocketServer } = require('ws');
 
-// Cấu hình cổng chạy Server (Thích ứng với Render/Glitch/Heroku)
 const PORT = process.env.PORT || 8080;
 
-// Khởi tạo HTTP Server cơ bản để phục vụ kiểm tra sức khỏe (Health Check)
-const server = http.createServer((req, res) => {
-    const parsedUrl = url.parse(req.url);
-    if (parsedUrl.pathname === '/') {
+// ─── HTTP server (health check cho Render) ───────────────────
+const httpServer = http.createServer((req, res) => {
+    if (url.parse(req.url).pathname === '/') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(`
-            <html>
-                <head><title>Aether-Eye Cloud Relay</title></head>
-                <style>
-                    body { font-family: sans-serif; background: #080b11; color: #f3f4f6; text-align: center; padding-top: 100px; }
-                    h1 { color: #00f2fe; }
-                    .status { display: inline-block; background: rgba(57, 255, 20, 0.15); color: #39ff14; padding: 5px 15px; border-radius: 20px; font-weight: bold; }
-                </style>
-                <body>
-                    <h1>Aether-Eye ESP32-CAM Cloud Relay Server</h1>
-                    <p class="status">● Đang hoạt động</p>
-                    <p>Địa chỉ luồng Client: <code>wss://YOUR_DOMAIN/client</code></p>
-                    <p>Địa chỉ luồng Camera: <code>wss://YOUR_DOMAIN/esp32cam</code></p>
-                </body>
-            </html>
-        `);
+        res.end(`<!DOCTYPE html><html><head><title>Aether-Eye Relay</title>
+<style>body{font-family:sans-serif;background:#080b11;color:#f3f4f6;text-align:center;padding:80px}
+h1{color:#00f2fe}.ok{color:#39ff14;font-weight:bold}</style></head>
+<body><h1>Aether-Eye ESP32-CAM Cloud Relay</h1>
+<p class="ok">● Đang hoạt động — Server v3.0</p>
+<p>Camera endpoint: <code>wss://DOMAIN/esp32cam</code></p>
+<p>Browser endpoint: <code>wss://DOMAIN/client</code></p>
+</body></html>`);
     } else {
-        res.writeHead(404);
-        res.end();
+        res.writeHead(404); res.end();
     }
 });
 
-// Tạo 2 server WebSocket riêng cho Camera và Browser Client
-const wssCamera = new WebSocketServer({ noServer: true });
+// ─── WebSocket servers ────────────────────────────────────────
+const wssCamera  = new WebSocketServer({ noServer: true });
 const wssClients = new WebSocketServer({ noServer: true });
 
-let cameraSocket = null;
-let cameraReadyAt = 0;  // Timestamp khi camera ổn định và sẵn sàng nhận lệnh
-const CAMERA_STABILIZE_MS = 5000; // 5 giây chờ sau khi camera kết nối
+let cameraSocket   = null;   // socket ESP32-CAM hiện tại
+let cameraReady    = false;  // true sau khi camera gửi register_camera
+let cameraReadyAt  = 0;      // timestamp sẵn sàng nhận lệnh
+
 const clientSockets = new Set();
 
-// ==========================================================================
-// LOGIC CAMERA WEBSOCKET
-// ==========================================================================
+// ─────────────────────────────────────────────────────────────
+// CAMERA WEBSOCKET  (/esp32cam)
+// ─────────────────────────────────────────────────────────────
 wssCamera.on('connection', (ws) => {
-    console.log('[Camera] Kết nối mới từ ESP32-CAM!');
-    cameraSocket = ws;
-    cameraReadyAt = Date.now() + CAMERA_STABILIZE_MS; // Chặn lệnh 5 giây đầu
-    ws.isAlive = true;
-    ws.on('pong', () => { ws.isAlive = true; });
-    
-    // Thông báo cho các client là camera đã trực tuyến
-    broadcastToClients(JSON.stringify({ type: 'status', camera: 'online', flash: false }));
+    console.log('[CAM] ESP32-CAM kết nối mới!');
 
-    ws.on('message', (message, isBinary) => {
-        // Nếu là dữ liệu Binary (Khung ảnh JPEG), chuyển tiếp cho toàn bộ các Client
+    // Đóng socket camera cũ nếu còn tồn tại
+    if (cameraSocket && cameraSocket !== ws) {
+        console.log('[CAM] Đóng socket camera cũ.');
+        cameraSocket.terminate();
+    }
+
+    cameraSocket  = ws;
+    cameraReady   = false;
+    cameraReadyAt = 0;
+    ws.isAlive    = true;
+
+    ws.on('pong', () => { ws.isAlive = true; });
+
+    ws.on('message', (data, isBinary) => {
         if (isBinary) {
-            broadcastToClients(message, true);
-        } else {
-            // Nhận lệnh text từ camera (ví dụ báo cáo trạng thái)
-            const textMsg = message.toString().trim();
-            console.log('[Camera -> Server] Nhận tin nhắn text:', textMsg);
-            broadcastToClients(textMsg);
+            // Frame ảnh JPEG → chuyển tiếp tới tất cả browser
+            broadcastToClients(data, true);
+            return;
         }
+
+        const text = data.toString().trim();
+
+        // ── Handshake: camera báo đã sẵn sàng ──────────────
+        // Firmware gửi "register_camera" ngay khi WStype_CONNECTED
+        if (text === 'register_camera') {
+            cameraReady   = true;
+            cameraReadyAt = Date.now();
+            console.log('[CAM] Đã nhận register_camera. Camera ONLINE và sẵn sàng.');
+            broadcastToClients(JSON.stringify({ type: 'status', camera: 'online' }));
+            return;
+        }
+
+        // ── Mọi text khác từ camera → chuyển tiếp tới browser ──
+        console.log('[CAM → Browser]', text);
+        broadcastToClients(text);
     });
 
     ws.on('close', (code, reason) => {
-        console.log(`[Camera] ESP32-CAM đã ngắt kết nối. Code: ${code}, Reason: ${reason || 'none'}`);
+        console.log(`[CAM] ESP32-CAM ngắt kết nối. Code=${code}`);
         if (cameraSocket === ws) {
-            cameraSocket = null;
+            cameraSocket  = null;
+            cameraReady   = false;
             cameraReadyAt = 0;
         }
         broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
     });
 
-    ws.on('error', (error) => {
-        console.error('[Camera] Lỗi socket:', error.message);
+    ws.on('error', (err) => {
+        console.error('[CAM] Lỗi socket:', err.message);
         if (cameraSocket === ws) {
-            cameraSocket = null;
+            cameraSocket  = null;
+            cameraReady   = false;
             cameraReadyAt = 0;
         }
     });
 });
 
-// ==========================================
-// LOGIC BROWSER CLIENT WEBSOCKET
-// ==========================================
+// ─────────────────────────────────────────────────────────────
+// BROWSER WEBSOCKET  (/client)
+// ─────────────────────────────────────────────────────────────
 wssClients.on('connection', (ws) => {
-    console.log(`[Client] Người xem mới kết nối. Tổng số người xem: ${clientSockets.size + 1}`);
     clientSockets.add(ws);
     ws.isAlive = true;
+    console.log(`[Browser] Người xem kết nối. Tổng: ${clientSockets.size}`);
+
     ws.on('pong', () => { ws.isAlive = true; });
 
-    // Gửi trạng thái camera hiện tại cho client mới kết nối
+    // Gửi trạng thái hiện tại của camera cho browser mới
     ws.send(JSON.stringify({
-        type: 'status',
-        camera: cameraSocket ? 'online' : 'offline'
+        type:   'status',
+        camera: (cameraSocket && cameraReady) ? 'online' : 'offline'
     }));
 
-    // Không tự động phát luồng khi kết nối để tránh nghẽn mạng từ xa qua Cloud.
-    // Client sẽ tự nhấn nút "Phát Luồng" để bắt đầu luồng ảnh khi cần thiết.
+    ws.on('message', (data) => {
+        const command = data.toString().trim();
+        console.log(`[Browser → Server] Lệnh: '${command}'`);
 
-    ws.on('message', (message) => {
-        const command = message.toString().trim();
-        console.log(`[Client -> Server] Nhận lệnh '${command}' từ Client`);
-
-        if (!cameraSocket) {
-            console.log(`[Server] KHÔNG THỂ chuyển tiếp '${command}': camera chưa kết nối.`);
+        // Kiểm tra camera có sẵn sàng chưa
+        if (!cameraSocket || !cameraReady) {
+            console.log('[Server] Camera chưa sẵn sàng, bỏ qua lệnh:', command);
             return;
         }
 
-        // Chặn lệnh trong 5 giây đầu sau khi camera kết nối để tránh crash
-        const now = Date.now();
-        if (now < cameraReadyAt) {
-            const waitMs = cameraReadyAt - now;
-            console.log(`[Server] Chặn lệnh '${command}': camera đang ổn định, còn ${waitMs}ms.`);
+        if (cameraSocket.readyState !== 1 /* OPEN */) {
+            console.log('[Server] Camera socket không OPEN, bỏ qua.');
             return;
         }
 
-        console.log(`[Server -> Camera] readyState: ${cameraSocket.readyState}, gửi: '${command}'`);
-        
-        if (cameraSocket.readyState === 1) {
-            // Gửi KHÔNG có \0 – firmware 5:20PM dùng Arduino String, gắn \0 sẽ không match
-            cameraSocket.send(command, (err) => {
-                if (err) {
-                    console.error(`[Server -> Camera] Gửi '${command}' THẤT BẠI:`, err);
-                } else {
-                    console.log(`[Server -> Camera] Đã gửi '${command}' THÀNH CÔNG.`);
-                }
-            });
-        } else {
-            console.log(`[Server -> Camera] KHÔNG GỬI: readyState = ${cameraSocket.readyState}`);
-        }
+        // Gửi lệnh trực tiếp dưới dạng TEXT (không có \0)
+        // Firmware dùng: String message = String((char*)payload);
+        // → Tự dừng tại \0 nếu có, nhưng không cần thiết phải gắn thêm
+        cameraSocket.send(command, (err) => {
+            if (err) {
+                console.error(`[Server → CAM] Gửi '${command}' THẤT BẠI:`, err.message);
+            } else {
+                console.log(`[Server → CAM] Đã gửi '${command}' thành công.`);
+            }
+        });
     });
 
     ws.on('close', () => {
         clientSockets.delete(ws);
-        console.log(`[Client] Người xem thoát. Tổng số người xem: ${clientSockets.size}`);
+        console.log(`[Browser] Người xem thoát. Tổng: ${clientSockets.size}`);
 
-        // Tiết kiệm băng thông: Nếu không còn ai xem nữa, ra lệnh cho ESP32-CAM dừng stream (readyState 1 là OPEN)
-        if (clientSockets.size === 0 && cameraSocket && cameraSocket.readyState === 1) {
-            console.log('[Server] Không còn ai xem. Ra lệnh ESP32-CAM dừng stream.');
+        // Khi không còn ai xem → dừng stream để tiết kiệm tài nguyên ESP32
+        if (clientSockets.size === 0 && cameraSocket && cameraReady && cameraSocket.readyState === 1) {
+            console.log('[Server] Không còn ai xem → gửi stop_stream cho camera.');
             cameraSocket.send('stop_stream');
         }
     });
 
     ws.on('error', (err) => {
         clientSockets.delete(ws);
-        console.error('[Client] Lỗi socket:', err);
+        console.error('[Browser] Lỗi socket:', err.message);
     });
 });
 
-// Chuyển tiếp dữ liệu đến toàn bộ Client trình duyệt
+// ─── Broadcast tới tất cả browser ────────────────────────────
 function broadcastToClients(data, isBinary = false) {
-    clientSockets.forEach((client) => {
-        if (client.readyState === 1) {
-            client.send(data, { binary: isBinary });
+    clientSockets.forEach((ws) => {
+        if (ws.readyState === 1) {
+            ws.send(data, { binary: isBinary });
         }
     });
 }
 
-// ==========================================
-// PHÂN LOẠI UPGRADE KẾT NỐI (ROUTING)
-// ==========================================
-server.on('upgrade', (request, socket, head) => {
-    const pathname = url.parse(request.url).pathname;
+// ─── Routing WebSocket upgrade ────────────────────────────────
+httpServer.on('upgrade', (req, socket, head) => {
+    const pathname = url.parse(req.url).pathname;
 
     if (pathname === '/esp32cam') {
-        wssCamera.handleUpgrade(request, socket, head, (ws) => {
-            wssCamera.emit('connection', ws, request);
+        wssCamera.handleUpgrade(req, socket, head, (ws) => {
+            wssCamera.emit('connection', ws, req);
         });
     } else if (pathname === '/client') {
-        wssClients.handleUpgrade(request, socket, head, (ws) => {
-            wssClients.emit('connection', ws, request);
+        wssClients.handleUpgrade(req, socket, head, (ws) => {
+            wssClients.emit('connection', ws, req);
         });
     } else {
         socket.destroy();
     }
 });
 
-// ==========================================================================
-// HEARTBEAT MONITOR (PING/PONG) TO PREVENT TIMEOUTS
-// ==========================================================================
-const pingInterval = setInterval(() => {
-    // 1. Check Camera socket heartbeat
+// ─── Heartbeat (Ping/Pong mỗi 30s) ───────────────────────────
+const heartbeat = setInterval(() => {
+    // Camera
     if (cameraSocket) {
         if (cameraSocket.isAlive === false) {
-            console.log('[Server -> Camera] Không nhận được phản hồi pong. Ngắt kết nối camera.');
+            console.log('[Heartbeat] Camera không phản hồi pong → ngắt kết nối.');
             cameraSocket.terminate();
-            cameraSocket = null;
+            cameraSocket  = null;
+            cameraReady   = false;
+            cameraReadyAt = 0;
             broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
         } else {
             cameraSocket.isAlive = false;
@@ -198,10 +202,10 @@ const pingInterval = setInterval(() => {
         }
     }
 
-    // 2. Check Client sockets heartbeat
+    // Browsers
     clientSockets.forEach((ws) => {
         if (ws.isAlive === false) {
-            console.log('[Server -> Client] Không nhận được phản hồi pong. Ngắt kết nối client.');
+            console.log('[Heartbeat] Browser không phản hồi pong → ngắt kết nối.');
             ws.terminate();
             clientSockets.delete(ws);
         } else {
@@ -211,11 +215,9 @@ const pingInterval = setInterval(() => {
     });
 }, 30000);
 
-server.on('close', () => {
-    clearInterval(pingInterval);
-});
+httpServer.on('close', () => clearInterval(heartbeat));
 
-// Khởi động HTTP server lắng nghe kết nối
-server.listen(PORT, () => {
-    console.log(`Server Cloud Relay đang chạy tại cổng http://localhost:${PORT}`);
+// ─── Khởi động server ─────────────────────────────────────────
+httpServer.listen(PORT, () => {
+    console.log(`[Server] Aether-Eye Cloud Relay v3.0 đang chạy tại cổng ${PORT}`);
 });
