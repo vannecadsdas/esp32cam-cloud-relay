@@ -43,11 +43,17 @@ wssCamera.on('connection', (ws) => {
     const connectedAt = Date.now();
     console.log(`[CAM] ESP32-CAM kết nối mới! Time=${new Date(connectedAt).toLocaleTimeString('vi-VN')}`);
 
-    // Đóng socket camera cũ nếu còn tồn tại
+    // KHÔNG terminate() socket cũ!
+    // ESP32 reconnect rất nhanh → socket cũ và mới có thể dùng chung
+    // TCP stack → terminate() giết luôn connection mới → Code=1006
+    // Để socket cũ tự đóng qua sự kiện 'close' bình thường.
     if (cameraSocket && cameraSocket !== ws) {
-        console.log('[CAM] Đóng socket camera cũ.');
-        cameraSocket.terminate();
+        console.log('[CAM] Có socket camera cũ, để tự đóng. KHÔNG terminate().');
+        // Chỉ xóa tham chiếu, không gọi terminate/close
+        cameraSocket = null;
+        cameraReady  = false;
     }
+
     ws._connectedAt = connectedAt;
 
     cameraSocket  = ws;
