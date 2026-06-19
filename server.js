@@ -45,6 +45,8 @@ const clientSockets = new Set();
 wssCamera.on('connection', (ws) => {
     console.log('[Camera] Kết nối mới từ ESP32-CAM!');
     cameraSocket = ws;
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     
     // Thông báo cho các client là camera đã trực tuyến
     broadcastToClients(JSON.stringify({ type: 'status', camera: 'online', flash: false }));
@@ -83,6 +85,8 @@ wssCamera.on('connection', (ws) => {
 wssClients.on('connection', (ws) => {
     console.log(`[Client] Người xem mới kết nối. Tổng số người xem: ${clientSockets.size + 1}`);
     clientSockets.add(ws);
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
 
     // Gửi trạng thái camera hiện tại cho client mới kết nối
     ws.send(JSON.stringify({
@@ -161,6 +165,40 @@ server.on('upgrade', (request, socket, head) => {
     } else {
         socket.destroy();
     }
+});
+
+// ==========================================================================
+// HEARTBEAT MONITOR (PING/PONG) TO PREVENT TIMEOUTS
+// ==========================================================================
+const pingInterval = setInterval(() => {
+    // 1. Check Camera socket heartbeat
+    if (cameraSocket) {
+        if (cameraSocket.isAlive === false) {
+            console.log('[Server -> Camera] Không nhận được phản hồi pong. Ngắt kết nối camera.');
+            cameraSocket.terminate();
+            cameraSocket = null;
+            broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
+        } else {
+            cameraSocket.isAlive = false;
+            cameraSocket.ping();
+        }
+    }
+
+    // 2. Check Client sockets heartbeat
+    clientSockets.forEach((ws) => {
+        if (ws.isAlive === false) {
+            console.log('[Server -> Client] Không nhận được phản hồi pong. Ngắt kết nối client.');
+            ws.terminate();
+            clientSockets.delete(ws);
+        } else {
+            ws.isAlive = false;
+            ws.ping();
+        }
+    });
+}, 30000);
+
+server.on('close', () => {
+    clearInterval(pingInterval);
 });
 
 // Khởi động HTTP server lắng nghe kết nối
