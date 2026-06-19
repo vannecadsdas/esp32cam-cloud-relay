@@ -758,8 +758,8 @@ function toggleFlash() {
                 setTimeout(() => {
                     // Tiếp tục stream lại
                     wsClient.send('start_stream');
-                }, 100);
-            }, 100);
+                }, 1000);
+            }, 1000);
         }
     }
 }
@@ -786,8 +786,8 @@ function changeResolution(val) {
                 wsClient.send(`control:framesize:${val}`);
                 setTimeout(() => {
                     wsClient.send('start_stream');
-                }, 100);
-            }, 100);
+                }, 1000);
+            }, 1000);
         }
     }
     
@@ -819,8 +819,8 @@ function updateCamSetting(variable, val) {
                 wsClient.send(`control:${variable}:${val}`);
                 setTimeout(() => {
                     wsClient.send('start_stream');
-                }, 100);
-            }, 100);
+                }, 1000);
+            }, 1000);
         }
     }
 }
