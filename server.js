@@ -123,7 +123,8 @@ wssClients.on('connection', (ws) => {
         console.log(`[Server -> Camera] readyState: ${cameraSocket.readyState}, gửi: '${command}'`);
         
         if (cameraSocket.readyState === 1) {
-            cameraSocket.send(command + '\0', (err) => {
+            // Gửi KHÔNG có \0 – firmware 5:20PM dùng Arduino String, gắn \0 sẽ không match
+            cameraSocket.send(command, (err) => {
                 if (err) {
                     console.error(`[Server -> Camera] Gửi '${command}' THẤT BẠI:`, err);
                 } else {
@@ -141,8 +142,8 @@ wssClients.on('connection', (ws) => {
 
         // Tiết kiệm băng thông: Nếu không còn ai xem nữa, ra lệnh cho ESP32-CAM dừng stream (readyState 1 là OPEN)
         if (clientSockets.size === 0 && cameraSocket && cameraSocket.readyState === 1) {
-            console.log('[Server] Không còn ai xem. Ra lệnh ESP32-CAM tạm dừng camera để mát chip.');
-            cameraSocket.send('stop_stream\0');
+            console.log('[Server] Không còn ai xem. Ra lệnh ESP32-CAM dừng stream.');
+            cameraSocket.send('stop_stream');
         }
     });
 
