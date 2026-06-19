@@ -766,8 +766,7 @@ function toggleFlash() {
                 wsClient.send('stop_stream');
                 
                 setTimeout(() => {
-                    // Gửi cả 2 định dạng lệnh để đảm bảo tương thích
-                    wsClient.send(`control:flash:${val}`);
+                    // Gửi duy nhất lệnh flash_on/flash_off để tránh xung đột gói tin
                     wsClient.send(flashState ? 'flash_on' : 'flash_off');
                     
                     setTimeout(() => {
@@ -777,7 +776,6 @@ function toggleFlash() {
                 }, 1000);
             } else {
                 // Nếu luồng đang dừng sẵn, gửi lệnh trực tiếp mà không cần chờ đợi trì hoãn
-                wsClient.send(`control:flash:${val}`);
                 wsClient.send(flashState ? 'flash_on' : 'flash_off');
             }
         }
