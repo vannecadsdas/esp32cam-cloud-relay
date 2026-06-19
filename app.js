@@ -1,18 +1,11 @@
 // =============================================================
-// Aether-Eye Web Dashboard — app.js v3.0
-// Viết lại hoàn toàn theo đúng firmware ESP32-CAM
-//
-// Firmware API (Local HTTP):
-//   GET /stream        → MJPEG stream
-//   GET /capture       → JPEG tĩnh
-//   GET /status        → JSON { flash, motion_detect, is_cloud_streaming, wifi_rssi, free_heap }
-//   GET /control?var=X&val=Y → Điều khiển: flash, motion, framesize, quality, vflip, hmirror...
-//
-// Cloud WebSocket (qua server relay):
-//   Camera gửi: "register_camera" khi kết nối
-//   Server → Camera text: "start_stream", "stop_stream", "flash_on", "flash_off"
-//                         "control:framesize:N", "control:quality:N", ...
-//   Camera → Server binary: frame JPEG bytes
+// Aether-Eye Web Dashboard — app.js v4.0
+// Khớp chính xác với index.html (IDs + onclick functions)
+// Firmware API đã phân tích:
+//   Local HTTP: /stream /capture /status /control?var=X&val=Y
+//   Cloud WS:   Camera gửi "register_camera" → server → browser
+//               Browser → server → Camera: "start_stream","stop_stream",
+//                "flash_on","flash_off","control:var:val"
 // =============================================================
 
 'use strict';
@@ -22,116 +15,105 @@
 // ─────────────────────────────────────────────────────────────
 const CLOUD_DOMAIN   = 'esp32cam-cloud-relay-1dn4.onrender.com';
 const WS_CLIENT_PATH = '/client';
-const STATUS_POLL_MS = 5000;  // Poll /status mỗi 5 giây (chế độ LAN)
-const MAX_RECONNECT  = 5;     // Số lần thử kết nối lại Cloud tối đa
+const STATUS_POLL_MS = 5000;
+const MAX_RECONNECT  = 5;
 
 // ─────────────────────────────────────────────────────────────
-// TRẠNG THÁI ỨNG DỤNG
+// TRẠNG THÁI
 // ─────────────────────────────────────────────────────────────
-let mode         = 'idle';   // 'idle' | 'local' | 'cloud'
-let wsCloud      = null;     // WebSocket tới relay server
-let isStreaming  = false;    // Camera đang gửi frames
+let streamMode   = 'local';  // 'local' | 'cloud'
+let connState    = 'idle';   // 'idle' | 'connecting' | 'connected' | 'reconnecting'
+let isStreaming  = false;
 let flashOn      = false;
+let cameraIP     = '';
+let wsCloud      = null;
 let reconnectN   = 0;
 let reconnectTmr = null;
 let statusTmr    = null;
 let fpsTmr       = null;
 let fpsCount     = 0;
 let lastBlobUrl  = null;
-let cameraIP     = '';
 
 // ─────────────────────────────────────────────────────────────
-// DOM REFERENCES
+// DOM ELEMENTS  (khớp đúng ID trong index.html)
 // ─────────────────────────────────────────────────────────────
-const elVideo        = document.getElementById('camera-stream');
-const elLoader       = document.getElementById('video-loader');
-const elLoaderTxt    = document.getElementById('loader-text');
-const elStatusDot    = document.getElementById('status-dot');
-const elStatusTxt    = document.getElementById('status-text');
-const elBadge        = document.getElementById('stream-source-badge');
-const elBtnConnect   = document.getElementById('btn-connect');
-const elBtnStream    = document.getElementById('btn-stream-toggle');
-const elBtnFlash     = document.getElementById('btn-flash');
-const elBtnCapture   = document.getElementById('btn-capture');
-const elIpInput      = document.getElementById('ip-input');
-const elModeLocal    = document.getElementById('mode-local');
-const elModeCloud    = document.getElementById('mode-cloud');
-const elResSelect    = document.getElementById('setting-resolution');
-const elQualSlider   = document.getElementById('setting-quality');
-const elMotionSwitch = document.getElementById('setting-motion');
-const elStatFps      = document.getElementById('stream-fps');
-const elStatRes      = document.getElementById('stream-res');
-const elStatRssi     = document.getElementById('stat-rssi');
-const elStatHeap     = document.getElementById('stat-heap');
-const elGallery      = document.getElementById('gallery-grid');
+const elVideo       = document.getElementById('camera-stream');
+const elLoader      = document.getElementById('video-loader');
+const elLoaderTxt   = document.getElementById('loader-text');
+const elStatusDot   = document.getElementById('status-dot');
+const elStatusTxt   = document.getElementById('status-text');
+const elBadge       = document.getElementById('stream-source-badge');
+const elBtnConnect  = document.getElementById('btn-connect');
+const elBtnStream   = document.getElementById('btn-stream-toggle');
+const elBtnFlash    = document.getElementById('btn-flash');
+const elBtnCapture  = document.getElementById('btn-capture');
+const elIpInput     = document.getElementById('ip-address');      // ← id đúng trong HTML
+const elMockCanvas  = document.getElementById('mock-canvas');     // ← id đúng trong HTML
+const elGallery     = document.getElementById('gallery-grid');
+const elLightbox    = document.getElementById('lightbox');
+const elLightboxImg = document.getElementById('lightbox-img');
+const elStatFps     = document.getElementById('stream-fps');
+const elStatRes     = document.getElementById('stream-res');
+const elStatRssi    = document.getElementById('stat-rssi');
+const elStatHeap    = document.getElementById('stat-heap');
+const elMotionAlert = document.getElementById('motion-overlay');
 
 // ─────────────────────────────────────────────────────────────
 // KHỞI TẠO
 // ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-    setStatus('idle');
-    setupEventListeners();
-    initRadarCanvas();
-    loadGalleryFromStorage();
-    // Đọc IP đã lưu
     const savedIP = localStorage.getItem('camera_ip');
     if (savedIP && elIpInput) elIpInput.value = savedIP;
+
+    setUI('idle');
+    startRadarAnimation();
+    loadGallery();
+    updateStreamBtn(false);
 });
 
 // ─────────────────────────────────────────────────────────────
-// EVENT LISTENERS
+// MODE SELECTOR  (gọi từ onclick="switchStreamMode('local')")
 // ─────────────────────────────────────────────────────────────
-function setupEventListeners() {
-    // Nút kết nối / ngắt kết nối
-    if (elBtnConnect) elBtnConnect.addEventListener('click', onClickConnect);
+function switchStreamMode(m) {
+    if (connState !== 'idle') {
+        alert('Vui lòng ngắt kết nối trước khi đổi chế độ!');
+        return;
+    }
+    streamMode = m;
 
-    // Nút phát / dừng stream
-    if (elBtnStream) elBtnStream.addEventListener('click', onClickStream);
+    document.getElementById('btn-mode-local').classList.toggle('active', m === 'local');
+    document.getElementById('btn-mode-cloud').classList.toggle('active', m === 'cloud');
 
-    // Nút flash
-    if (elBtnFlash) elBtnFlash.addEventListener('click', onClickFlash);
+    const prefix = document.getElementById('connection-prefix');
+    if (prefix) prefix.textContent = m === 'local' ? 'http://' : 'wss://';
 
-    // Nút chụp ảnh
-    if (elBtnCapture) elBtnCapture.addEventListener('click', onClickCapture);
-
-    // Chọn chế độ (Local / Cloud)
-    if (elModeLocal) elModeLocal.addEventListener('change', onModeChange);
-    if (elModeCloud) elModeCloud.addEventListener('change', onModeChange);
-
-    // Thay đổi resolution (chỉ Local)
-    if (elResSelect) elResSelect.addEventListener('change', onResolutionChange);
-
-    // Thay đổi quality slider (chỉ Local)
-    if (elQualSlider) elQualSlider.addEventListener('input', onQualityChange);
-
-    // Toggle phát hiện chuyển động (chỉ Local)
-    if (elMotionSwitch) elMotionSwitch.addEventListener('change', onMotionChange);
-
-    // Fullscreen
-    const btnFs = document.getElementById('btn-fullscreen');
-    if (btnFs) btnFs.addEventListener('click', toggleFullscreen);
+    if (elIpInput) {
+        if (m === 'local') {
+            elIpInput.placeholder = '192.168.1.15';
+            elIpInput.value = localStorage.getItem('camera_ip') || '';
+        } else {
+            elIpInput.value = CLOUD_DOMAIN;
+            elIpInput.readOnly = true;
+        }
+    }
+    if (m !== 'local' && elIpInput) elIpInput.readOnly = false;
 }
 
 // ─────────────────────────────────────────────────────────────
-// CONNECT / DISCONNECT
+// KẾT NỐI / NGẮT KẾT NỐI  (onclick="toggleConnection()")
 // ─────────────────────────────────────────────────────────────
-function onClickConnect() {
-    if (mode !== 'idle') {
-        disconnect();
+function toggleConnection() {
+    if (connState === 'idle') {
+        doConnect();
     } else {
-        connect();
+        doDisconnect();
     }
 }
 
-function connect() {
-    const selectedMode = getSelectedMode();
-
-    if (selectedMode === 'local') {
+function doConnect() {
+    if (streamMode === 'local') {
         cameraIP = elIpInput ? elIpInput.value.trim() : '';
-        if (!cameraIP) {
-            alert('Vui lòng nhập địa chỉ IP của camera!');
-            return;
-        }
+        if (!cameraIP) { alert('Nhập địa chỉ IP camera!'); return; }
         localStorage.setItem('camera_ip', cameraIP);
         connectLocal();
     } else {
@@ -139,64 +121,66 @@ function connect() {
     }
 }
 
-function disconnect() {
-    stopStream();
+function doDisconnect() {
+    if (isStreaming) stopStream();
 
-    if (wsCloud) {
-        wsCloud.close();
-        wsCloud = null;
-    }
+    if (wsCloud) { wsCloud.close(); wsCloud = null; }
+    clearAllTimers();
 
-    clearTimers();
-    mode = 'idle';
-    setStatus('idle');
-    setStreamBtnState('hidden');
+    connState  = 'idle';
+    isStreaming = false;
+    setUI('idle');
+    updateStreamBtn(false);
+    hideBtnStream();
 
     if (elBtnConnect) {
-        elBtnConnect.textContent = 'Kết nối';
+        elBtnConnect.innerHTML = '<i class="fa-solid fa-play"></i> Kết nối';
         elBtnConnect.classList.remove('connected');
     }
-
-    showLoader('Nhấn Kết nối để bắt đầu...');
+    showLoader('Nhấn "Kết nối" để bắt đầu...');
 }
 
-// ─── Local (LAN) ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// LOCAL (LAN)
+// ─────────────────────────────────────────────────────────────
 function connectLocal() {
-    mode = 'local';
-    setStatus('connected-local');
+    connState = 'connected';
+    setUI('connected-local');
 
     if (elBtnConnect) {
-        elBtnConnect.textContent = 'Ngắt kết nối';
+        elBtnConnect.innerHTML = '<i class="fa-solid fa-stop"></i> Ngắt kết nối';
         elBtnConnect.classList.add('connected');
     }
-
-    updateBadge('local');
+    setBadge('local');
     showLoader('Đã kết nối LAN. Nhấn ▶ Phát Luồng để xem.');
-    setStreamBtnState('play');
+    showBtnStream();
+    updateStreamBtn(false);
 
-    // Poll trạng thái camera
+    // Poll status mỗi 5s
     pollStatus();
     statusTmr = setInterval(pollStatus, STATUS_POLL_MS);
+    startFpsCounter();
 }
 
 async function pollStatus() {
-    if (mode !== 'local') return;
+    if (streamMode !== 'local' || connState !== 'connected') return;
     try {
-        const res  = await fetch(`http://${cameraIP}/status`, { signal: AbortSignal.timeout(3000) });
-        const data = await res.json();
-        updateStatusUI(data);
-    } catch (_) {
-        // Không báo lỗi mỗi poll, chỉ im lặng
-    }
+        const r    = await fetch(`http://${cameraIP}/status`, { signal: AbortSignal.timeout(3000) });
+        const data = await r.json();
+        syncStatusData(data);
+    } catch (_) { /* im lặng */ }
 }
 
-// ─── Cloud (WebSocket relay) ──────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// CLOUD (WebSocket Relay)
+// ─────────────────────────────────────────────────────────────
 function connectCloud() {
-    setStatus('connecting');
+    connState = 'connecting';
+    setUI('connecting');
     showLoader('Đang kết nối tới Cloud Relay...');
 
     if (elBtnConnect) {
-        elBtnConnect.textContent = 'Đang kết nối...';
+        elBtnConnect.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang kết nối...';
         elBtnConnect.disabled = true;
     }
 
@@ -206,247 +190,325 @@ function connectCloud() {
 
         wsCloud.onopen = () => {
             reconnectN = 0;
-            mode       = 'cloud';
+            connState  = 'connected';
+
+            setBadge('cloud');
+            setUI('connected-cloud-waiting');
+            showLoader('Đang chờ ESP32-CAM kết nối...');
+            hideBtnStream();
 
             if (elBtnConnect) {
-                elBtnConnect.textContent = 'Ngắt kết nối';
+                elBtnConnect.innerHTML = '<i class="fa-solid fa-stop"></i> Ngắt kết nối';
                 elBtnConnect.classList.add('connected');
                 elBtnConnect.disabled = false;
             }
-
-            updateBadge('cloud');
-            // Không tự động start_stream — chờ camera online và user nhấn nút
-            showLoader('Đang chờ ESP32-CAM đăng ký kết nối...');
-            setStatus('cloud-waiting');
-            setStreamBtnState('hidden');
-
             startFpsCounter();
         };
 
         wsCloud.onmessage = (evt) => {
             if (evt.data instanceof Blob) {
-                // Binary = JPEG frame
-                if (!isStreaming) return; // Bỏ qua nếu user chưa nhấn Play
+                // Binary = JPEG frame từ camera
+                if (!isStreaming) return;
                 if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
                 lastBlobUrl = URL.createObjectURL(evt.data);
                 elVideo.src = lastBlobUrl;
                 fpsCount++;
                 hideLoader();
             } else {
-                // Text = JSON status
-                handleCloudMessage(evt.data);
+                onCloudMessage(evt.data);
             }
         };
 
         wsCloud.onclose = () => {
             if (lastBlobUrl) { URL.revokeObjectURL(lastBlobUrl); lastBlobUrl = null; }
 
-            if (mode === 'cloud') {
-                // Thử kết nối lại
+            if (connState === 'connected' || connState === 'connecting') {
                 if (reconnectN < MAX_RECONNECT) {
                     reconnectN++;
-                    setStatus('reconnecting');
-                    showLoader(`Mất kết nối Cloud. Thử lại lần ${reconnectN}/${MAX_RECONNECT}...`);
+                    connState = 'reconnecting';
+                    setUI('reconnecting');
+                    showLoader(`Mất kết nối. Thử lại lần ${reconnectN}/${MAX_RECONNECT}...`);
                     reconnectTmr = setTimeout(connectCloud, 4000);
                 } else {
-                    disconnect();
-                    alert('Không thể kết nối lại Cloud Relay sau nhiều lần thử!');
+                    doDisconnect();
+                    alert('Không thể kết nối Cloud Relay sau nhiều lần thử!');
                 }
             }
         };
 
-        wsCloud.onerror = (e) => {
-            console.error('[WS] Lỗi:', e);
+        wsCloud.onerror = () => {
             if (elBtnConnect) elBtnConnect.disabled = false;
         };
 
     } catch (e) {
-        console.error('[WS] Không thể tạo WebSocket:', e);
-        disconnect();
+        console.error('[WS]', e);
+        doDisconnect();
     }
 }
 
-function handleCloudMessage(text) {
+function onCloudMessage(text) {
     try {
         const msg = JSON.parse(text);
+        if (msg.type !== 'status') return;
 
-        if (msg.type === 'status') {
-            if (msg.camera === 'online') {
-                // Camera đã đăng ký (register_camera đã nhận ở server)
-                setStatus('connected-cloud');
-                showLoader('Camera ONLINE. Nhấn ▶ Phát Luồng để xem.');
-                setStreamBtnState('play');
-            } else if (msg.camera === 'offline') {
-                setStatus('cloud-waiting');
-                showLoader('Camera đã ngắt kết nối. Đang chờ kết nối lại...');
-                setStreamBtnState('hidden');
-                isStreaming = false;
-                if (lastBlobUrl) { URL.revokeObjectURL(lastBlobUrl); lastBlobUrl = null; }
-            }
-            return;
+        if (msg.camera === 'online') {
+            // Camera đã đăng ký (server nhận register_camera từ ESP32)
+            setUI('connected-cloud-online');
+            showLoader('Camera ONLINE. Nhấn ▶ Phát Luồng để xem!');
+            showBtnStream();
+            updateStreamBtn(false);
+
+        } else if (msg.camera === 'offline') {
+            setUI('connected-cloud-waiting');
+            showLoader('Camera đã offline. Đang chờ ESP32-CAM kết nối lại...');
+            hideBtnStream();
+            isStreaming = false;
+            if (lastBlobUrl) { URL.revokeObjectURL(lastBlobUrl); lastBlobUrl = null; }
         }
     } catch (_) {
-        // Không phải JSON → log thô
-        console.log('[Cloud text]', text);
+        console.log('[Cloud]', text);
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-// STREAM CONTROL
+// STREAM  (onclick="toggleStreamState()")
 // ─────────────────────────────────────────────────────────────
-function onClickStream() {
-    if (isStreaming) {
-        stopStream();
-    } else {
-        startStream();
-    }
+function toggleStreamState() {
+    if (connState !== 'connected') return;
+    if (isStreaming) stopStream();
+    else startStream();
 }
 
 function startStream() {
-    if (mode === 'local') {
+    if (streamMode === 'local') {
         elVideo.src = `http://${cameraIP}/stream`;
+        elVideo.style.display = 'block';
+        if (elMockCanvas) elMockCanvas.style.display = 'none';
         hideLoader();
-        isStreaming = true;
-        setStreamBtnState('pause');
-        elStatRes.textContent = 'MJPEG';
-    } else if (mode === 'cloud') {
-        if (!wsCloud || wsCloud.readyState !== WebSocket.OPEN) {
-            alert('Chưa kết nối Cloud!'); return;
-        }
-        isStreaming = true;
-        setStreamBtnState('pause');
-        showLoader('Đang yêu cầu camera bắt đầu phát...');
+        const sel = document.getElementById('setting-resolution');
+        if (sel) updateResLabel(sel.value);
+    } else {
+        if (!wsCloud || wsCloud.readyState !== WebSocket.OPEN) return;
         wsCloud.send('start_stream');
+        showLoader('Đang yêu cầu camera phát luồng...');
     }
+    isStreaming = true;
+    updateStreamBtn(true);
 }
 
 function stopStream() {
-    if (mode === 'local') {
+    if (streamMode === 'local') {
         elVideo.src = '';
-        showLoader('Stream đã dừng. Nhấn ▶ để tiếp tục.');
-    } else if (mode === 'cloud') {
+        elVideo.style.display = 'none';
+        if (elMockCanvas) elMockCanvas.style.display = 'block';
+        showLoader('Đã dừng phát. Nhấn ▶ để tiếp tục.');
+    } else {
         if (wsCloud && wsCloud.readyState === WebSocket.OPEN) {
             wsCloud.send('stop_stream');
         }
-        showLoader('Stream đã dừng. Nhấn ▶ để tiếp tục.');
+        showLoader('Đã dừng phát. Nhấn ▶ để tiếp tục.');
     }
     isStreaming = false;
-    setStreamBtnState('play');
+    updateStreamBtn(false);
     fpsCount = 0;
-    elStatFps.textContent = '0 FPS';
+    if (elStatFps) elStatFps.textContent = '0 FPS';
 }
 
 // ─────────────────────────────────────────────────────────────
-// FLASH
+// FLASH  (onclick="toggleFlash()")
 // ─────────────────────────────────────────────────────────────
-function onClickFlash() {
+function toggleFlash() {
+    if (connState !== 'connected') return;
     flashOn = !flashOn;
 
-    if (mode === 'local') {
-        fetch(`http://${cameraIP}/control?var=flash&val=${flashOn ? '1' : '0'}`)
-            .catch(console.error);
-    } else if (mode === 'cloud' && wsCloud && wsCloud.readyState === WebSocket.OPEN) {
+    if (streamMode === 'local') {
+        fetch(`http://${cameraIP}/control?var=flash&val=${flashOn ? '1' : '0'}`).catch(console.error);
+    } else if (wsCloud && wsCloud.readyState === WebSocket.OPEN) {
         wsCloud.send(flashOn ? 'flash_on' : 'flash_off');
     }
 
-    updateFlashUI();
+    if (elBtnFlash) {
+        elBtnFlash.innerHTML = flashOn
+            ? '<i class="fa-solid fa-lightbulb"></i> Flash: BẬT'
+            : '<i class="fa-solid fa-lightbulb"></i> Flash: TẮT';
+        elBtnFlash.classList.toggle('active', flashOn);
+    }
 }
 
-function updateFlashUI() {
-    if (!elBtnFlash) return;
-    if (flashOn) {
-        elBtnFlash.classList.add('active');
-        elBtnFlash.innerHTML = '<i class="fa-solid fa-bolt"></i> Flash ON';
+// ─────────────────────────────────────────────────────────────
+// SNAPSHOT  (onclick="takeSnapshot()")
+// ─────────────────────────────────────────────────────────────
+function takeSnapshot() {
+    if (connState !== 'connected') return;
+
+    if (streamMode === 'local') {
+        fetch(`http://${cameraIP}/capture?t=${Date.now()}`)
+            .then(r => r.blob())
+            .then(blob => saveToGallery(blob))
+            .catch(e => alert('Chụp ảnh thất bại: ' + e.message));
     } else {
-        elBtnFlash.classList.remove('active');
-        elBtnFlash.innerHTML = '<i class="fa-solid fa-bolt"></i> Flash';
+        // Cloud mode: chụp từ frame hiện tại
+        if (!lastBlobUrl) { alert('Chưa có ảnh stream để chụp!'); return; }
+        fetch(lastBlobUrl)
+            .then(r => r.blob())
+            .then(blob => saveToGallery(blob))
+            .catch(console.error);
     }
 }
 
 // ─────────────────────────────────────────────────────────────
-// CAPTURE (chỉ Local)
+// CAMERA SETTINGS — Local HTTP controls
 // ─────────────────────────────────────────────────────────────
-function onClickCapture() {
-    if (mode !== 'local') {
-        alert('Chức năng chụp ảnh chỉ hỗ trợ ở chế độ LAN!');
-        return;
-    }
-    const src = `http://${cameraIP}/capture?t=${Date.now()}`;
-    fetch(src)
-        .then(r => r.blob())
-        .then(blob => {
-            const imgUrl = URL.createObjectURL(blob);
-            saveToGallery(imgUrl, blob);
-        })
-        .catch(e => alert('Chụp ảnh thất bại: ' + e.message));
-}
 
-// ─────────────────────────────────────────────────────────────
-// CAMERA CONTROLS (Local)
-// ─────────────────────────────────────────────────────────────
-function onModeChange() {
-    // Chỉ cập nhật UI, không kết nối
-    const m = getSelectedMode();
-    if (m === 'local') {
-        if (elIpInput) elIpInput.closest('.ip-row') && (elIpInput.parentElement.style.display = 'flex');
-    }
-}
-
-function onResolutionChange() {
-    if (mode !== 'local') return;
-    const val = elResSelect.value;
+// onclick gọi qua HTML: onchange="changeResolution(this.value)"
+function changeResolution(val) {
+    if (streamMode !== 'local' || connState !== 'connected') return;
     fetch(`http://${cameraIP}/control?var=framesize&val=${val}`).catch(console.error);
-    const labels = { '1': 'QQVGA', '3': 'HQVGA', '4': 'QVGA', '5': 'CIF', '6': 'HVGA', '7': 'VGA', '8': 'SVGA' };
-    elStatRes.textContent = labels[val] || 'VGA';
+    updateResLabel(val);
 }
 
-function onQualityChange() {
-    if (mode !== 'local') return;
-    const val = elQualSlider.value;
-    const label = document.getElementById('quality-label');
-    if (label) label.textContent = val;
+// onclick gọi qua HTML: onchange="changeQuality(this.value)"
+function changeQuality(val) {
+    if (streamMode !== 'local' || connState !== 'connected') return;
     fetch(`http://${cameraIP}/control?var=quality&val=${val}`).catch(console.error);
 }
 
-function onMotionChange() {
-    if (mode !== 'local') return;
-    const val = elMotionSwitch.checked ? '1' : '0';
-    fetch(`http://${cameraIP}/control?var=motion&val=${val}`).catch(console.error);
+// onclick gọi qua HTML: oninput="updateRangeLabel('quality', this.value)"
+function updateRangeLabel(name, val) {
+    const el = document.getElementById('val-' + name);
+    if (el) el.textContent = val;
+}
+
+// onclick gọi qua HTML: onchange="updateCamSetting('brightness', this.value)"
+function updateCamSetting(varName, val) {
+    if (streamMode !== 'local' || connState !== 'connected') return;
+    fetch(`http://${cameraIP}/control?var=${varName}&val=${val}`).catch(console.error);
+}
+
+// onclick gọi qua HTML: onchange="toggleHardwareMotion()"
+function toggleHardwareMotion() {
+    const el = document.getElementById('setting-motion');
+    if (!el) return;
+    if (streamMode !== 'local' || connState !== 'connected') return;
+    fetch(`http://${cameraIP}/control?var=motion&val=${el.checked ? '1' : '0'}`).catch(console.error);
 }
 
 // ─────────────────────────────────────────────────────────────
-// STATUS / UI HELPERS
+// GALLERY  (onclick="clearGallery()")
 // ─────────────────────────────────────────────────────────────
-function setStatus(state) {
-    if (!elStatusDot || !elStatusTxt) return;
-    const states = {
-        'idle':             { dot: '',            text: 'Chưa kết nối' },
-        'connecting':       { dot: 'connecting',  text: 'Đang kết nối...' },
-        'reconnecting':     { dot: 'connecting',  text: 'Đang thử kết nối lại...' },
-        'connected-local':  { dot: 'connected',   text: 'Đã kết nối LAN' },
-        'cloud-waiting':    { dot: 'connecting',  text: 'Chờ Camera...' },
-        'connected-cloud':  { dot: 'connected',   text: 'Đã kết nối Cloud' },
+const GALLERY_KEY = 'aether_gallery_v2';
+
+function saveToGallery(blob) {
+    const reader = new FileReader();
+    reader.onload = () => {
+        const b64 = reader.result;
+        const arr = JSON.parse(localStorage.getItem(GALLERY_KEY) || '[]');
+        arr.unshift({ src: b64, ts: new Date().toLocaleString('vi-VN') });
+        if (arr.length > 30) arr.pop();
+        localStorage.setItem(GALLERY_KEY, JSON.stringify(arr));
+        renderThumb(b64, arr[0].ts);
     };
-    const s = states[state] || states['idle'];
-    elStatusDot.className = 'dot ' + s.dot;
-    elStatusTxt.textContent = s.text;
+    reader.readAsDataURL(blob);
 }
 
-function updateBadge(type) {
-    if (!elBadge) return;
-    if (type === 'local') {
-        elBadge.innerHTML = '<i class="fa-solid fa-wifi"></i> LAN';
-        elBadge.className = 'badge mode-badge local';
-    } else {
-        elBadge.innerHTML = '<i class="fa-solid fa-cloud"></i> CLOUD';
-        elBadge.className = 'badge mode-badge cloud';
+function loadGallery() {
+    const arr = JSON.parse(localStorage.getItem(GALLERY_KEY) || '[]');
+    arr.forEach(item => renderThumb(item.src, item.ts));
+}
+
+function renderThumb(src, ts) {
+    if (!elGallery) return;
+    // Xóa placeholder nếu còn
+    const empty = elGallery.querySelector('.gallery-empty');
+    if (empty) empty.remove();
+
+    const wrap = document.createElement('div');
+    wrap.className = 'gallery-item';
+
+    const img = document.createElement('img');
+    img.src = src;
+    img.className = 'gallery-thumb';
+    img.addEventListener('click', () => openLightbox(src, ts));
+
+    const caption = document.createElement('span');
+    caption.className = 'gallery-ts';
+    caption.textContent = ts || '';
+
+    wrap.appendChild(img);
+    wrap.appendChild(caption);
+    elGallery.prepend(wrap);
+}
+
+function clearGallery() {
+    if (!confirm('Xóa toàn bộ ảnh đã chụp?')) return;
+    localStorage.removeItem(GALLERY_KEY);
+    if (elGallery) {
+        elGallery.innerHTML = `<div class="gallery-empty">
+            <i class="fa-regular fa-image"></i>
+            <p>Chưa có ảnh chụp nào trong thư viện.</p>
+        </div>`;
     }
 }
 
-function showLoader(text) {
-    if (elLoader) elLoader.style.display = 'flex';
-    if (elVideo)  elVideo.style.display  = 'none';
-    if (elLoaderTxt) elLoaderTxt.textContent = text || '';
+// ─────────────────────────────────────────────────────────────
+// LIGHTBOX  (onclick="closeLightbox()")
+// ─────────────────────────────────────────────────────────────
+function openLightbox(src, caption) {
+    if (!elLightbox) return;
+    elLightboxImg.src = src;
+    const cap = document.getElementById('lightbox-caption');
+    if (cap) cap.textContent = caption || '';
+    elLightbox.style.display = 'flex';
+}
+
+function closeLightbox() {
+    if (elLightbox) elLightbox.style.display = 'none';
+}
+
+// ─────────────────────────────────────────────────────────────
+// FULLSCREEN  (onclick="toggleFullscreen()")
+// ─────────────────────────────────────────────────────────────
+function toggleFullscreen() {
+    const el = document.getElementById('video-container') || elVideo;
+    if (!document.fullscreenElement) {
+        el.requestFullscreen && el.requestFullscreen();
+    } else {
+        document.exitFullscreen && document.exitFullscreen();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// UI HELPERS
+// ─────────────────────────────────────────────────────────────
+function setUI(state) {
+    const map = {
+        'idle':                   { dot: 'disconnected', txt: 'Chưa kết nối' },
+        'connecting':             { dot: 'connecting',   txt: 'Đang kết nối...' },
+        'reconnecting':           { dot: 'connecting',   txt: 'Đang thử lại...' },
+        'connected-local':        { dot: 'connected',    txt: 'Đã kết nối LAN' },
+        'connected-cloud-waiting':{ dot: 'connecting',   txt: 'Chờ Camera...' },
+        'connected-cloud-online': { dot: 'connected',    txt: 'Đã kết nối Cloud' },
+    };
+    const s = map[state] || map['idle'];
+    if (elStatusDot) elStatusDot.className = 'dot ' + s.dot;
+    if (elStatusTxt) elStatusTxt.textContent = s.txt;
+}
+
+function setBadge(type) {
+    if (!elBadge) return;
+    if (type === 'local') {
+        elBadge.innerHTML = '<i class="fa-solid fa-wifi"></i> LAN';
+        elBadge.className = 'badge mode-badge';
+    } else {
+        elBadge.innerHTML = '<i class="fa-solid fa-cloud"></i> CLOUD';
+        elBadge.className = 'badge mode-badge';
+    }
+}
+
+function showLoader(txt) {
+    if (elLoader)    elLoader.style.display   = 'flex';
+    if (elVideo)     elVideo.style.display    = 'none';
+    if (elLoaderTxt) elLoaderTxt.textContent  = txt || '';
 }
 
 function hideLoader() {
@@ -454,46 +516,54 @@ function hideLoader() {
     if (elVideo)  elVideo.style.display  = 'block';
 }
 
-function setStreamBtnState(state) {
+function showBtnStream() {
+    if (elBtnStream) elBtnStream.style.display = '';
+}
+
+function hideBtnStream() {
+    if (elBtnStream) elBtnStream.style.display = 'none';
+}
+
+function updateStreamBtn(playing) {
     if (!elBtnStream) return;
-    if (state === 'hidden') {
-        elBtnStream.style.display = 'none';
-    } else if (state === 'play') {
-        elBtnStream.style.display = '';
-        elBtnStream.innerHTML = '<i class="fa-solid fa-play"></i> Phát Luồng';
-        elBtnStream.classList.remove('active');
-    } else if (state === 'pause') {
-        elBtnStream.style.display = '';
+    if (playing) {
         elBtnStream.innerHTML = '<i class="fa-solid fa-pause"></i> Dừng Phát';
         elBtnStream.classList.add('active');
+    } else {
+        elBtnStream.innerHTML = '<i class="fa-solid fa-play"></i> Phát Luồng';
+        elBtnStream.classList.remove('active');
     }
 }
 
-function updateStatusUI(data) {
+function updateResLabel(val) {
+    const labels = { '1':'QQVGA','3':'HQVGA','4':'QVGA','5':'CIF','6':'VGA','7':'SVGA','8':'XGA','9':'SXGA','10':'UXGA' };
+    if (elStatRes) elStatRes.textContent = labels[val] || 'VGA';
+}
+
+function syncStatusData(data) {
     if (!data) return;
     if (data.flash !== undefined) {
         flashOn = data.flash;
-        updateFlashUI();
+        if (elBtnFlash) {
+            elBtnFlash.innerHTML = `<i class="fa-solid fa-lightbulb"></i> Flash: ${flashOn ? 'BẬT' : 'TẮT'}`;
+            elBtnFlash.classList.toggle('active', flashOn);
+        }
     }
-    if (data.motion_detect !== undefined && elMotionSwitch) {
-        elMotionSwitch.checked = data.motion_detect;
+    if (data.motion_detect !== undefined) {
+        const el = document.getElementById('setting-motion');
+        if (el) el.checked = data.motion_detect;
     }
     if (data.wifi_rssi !== undefined && elStatRssi) {
-        const rssi = data.wifi_rssi;
-        const q = rssi >= -60 ? 'Tốt' : rssi >= -75 ? 'Vừa' : 'Yếu';
-        elStatRssi.textContent = `${rssi} dBm (${q})`;
+        const r = data.wifi_rssi;
+        const q = r >= -60 ? 'Tốt' : r >= -75 ? 'Vừa' : 'Yếu';
+        elStatRssi.textContent = `${r} dBm (${q})`;
     }
     if (data.free_heap !== undefined && elStatHeap) {
         elStatHeap.textContent = `${Math.round(data.free_heap / 1024)} KB`;
     }
 }
 
-function getSelectedMode() {
-    if (elModeCloud && elModeCloud.checked) return 'cloud';
-    return 'local';
-}
-
-function clearTimers() {
+function clearAllTimers() {
     if (reconnectTmr) { clearTimeout(reconnectTmr);  reconnectTmr = null; }
     if (statusTmr)    { clearInterval(statusTmr);     statusTmr    = null; }
     if (fpsTmr)       { clearInterval(fpsTmr);        fpsTmr       = null; }
@@ -512,96 +582,90 @@ function startFpsCounter() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// FULLSCREEN
+// RADAR ANIMATION (canvas "mock-canvas" khi offline)
 // ─────────────────────────────────────────────────────────────
-function toggleFullscreen() {
-    const wrap = document.getElementById('video-wrapper') || elVideo;
-    if (!document.fullscreenElement) {
-        wrap.requestFullscreen && wrap.requestFullscreen();
-    } else {
-        document.exitFullscreen && document.exitFullscreen();
-    }
-}
-
-// ─────────────────────────────────────────────────────────────
-// GALLERY (lưu ảnh chụp vào localStorage)
-// ─────────────────────────────────────────────────────────────
-const GALLERY_KEY = 'aether_gallery';
-
-function saveToGallery(imgUrl, blob) {
-    const reader = new FileReader();
-    reader.onload = () => {
-        const b64 = reader.result;
-        const stored = JSON.parse(localStorage.getItem(GALLERY_KEY) || '[]');
-        stored.unshift({ src: b64, ts: Date.now() });
-        if (stored.length > 20) stored.pop(); // Giữ tối đa 20 ảnh
-        localStorage.setItem(GALLERY_KEY, JSON.stringify(stored));
-        renderGalleryItem(b64);
-    };
-    reader.readAsDataURL(blob);
-}
-
-function loadGalleryFromStorage() {
-    const stored = JSON.parse(localStorage.getItem(GALLERY_KEY) || '[]');
-    stored.forEach(item => renderGalleryItem(item.src));
-}
-
-function renderGalleryItem(src) {
-    if (!elGallery) return;
-    const img = document.createElement('img');
-    img.src   = src;
-    img.className = 'gallery-thumb';
-    img.addEventListener('click', () => window.open(src, '_blank'));
-    elGallery.prepend(img);
-}
-
-// ─────────────────────────────────────────────────────────────
-// RADAR CANVAS (hiệu ứng khi chưa kết nối)
-// ─────────────────────────────────────────────────────────────
-function initRadarCanvas() {
-    const canvas = document.getElementById('radar-canvas');
+function startRadarAnimation() {
+    const canvas = elMockCanvas;
     if (!canvas) return;
-    const ctx    = canvas.getContext('2d');
-    let angle    = 0;
-    const W      = canvas.width;
-    const H      = canvas.height;
-    const cx     = W / 2;
-    const cy     = H / 2;
-    const r      = Math.min(cx, cy) - 10;
 
-    function drawRadar() {
-        ctx.clearRect(0, 0, W, H);
+    canvas.width  = canvas.offsetWidth  || 640;
+    canvas.height = canvas.offsetHeight || 480;
 
-        // Vòng tròn
-        ctx.strokeStyle = 'rgba(0,242,254,0.2)';
-        ctx.lineWidth   = 1;
+    const ctx = canvas.getContext('2d');
+    const cx  = canvas.width  / 2;
+    const cy  = canvas.height / 2;
+    const R   = Math.min(cx, cy) * 0.85;
+    let angle = 0;
+
+    // Điểm ngẫu nhiên để giả lập vật thể
+    const dots = Array.from({ length: 6 }, () => ({
+        angle: Math.random() * Math.PI * 2,
+        dist:  Math.random() * 0.8 + 0.1,
+        alpha: 0
+    }));
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Nền
+        ctx.fillStyle = '#060913';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Lưới vòng tròn
         for (let i = 1; i <= 4; i++) {
             ctx.beginPath();
-            ctx.arc(cx, cy, r * i / 4, 0, Math.PI * 2);
+            ctx.arc(cx, cy, R * i / 4, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(0,242,254,0.15)';
+            ctx.lineWidth = 1;
             ctx.stroke();
         }
 
-        // Tia quét
-        const grad = ctx.createConicalGradient
-            ? ctx.createConicalGradient(cx, cy, angle - 1, angle + 0.5)
-            : null;
+        // Đường chữ thập
+        ctx.strokeStyle = 'rgba(0,242,254,0.1)';
+        ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
 
+        // Tia quét
         ctx.save();
         ctx.translate(cx, cy);
         ctx.rotate(angle);
-        const sweep = ctx.createLinearGradient(0, 0, r, 0);
-        sweep.addColorStop(0,   'rgba(0,242,254,0.7)');
+        const sweep = ctx.createLinearGradient(0, 0, R, 0);
+        sweep.addColorStop(0,   'rgba(0,242,254,0.6)');
+        sweep.addColorStop(0.6, 'rgba(0,242,254,0.1)');
         sweep.addColorStop(1,   'rgba(0,242,254,0)');
         ctx.fillStyle = sweep;
         ctx.beginPath();
         ctx.moveTo(0, 0);
-        ctx.arc(0, 0, r, -0.3, 0.3);
+        ctx.arc(0, 0, R, -0.25, 0.25);
         ctx.closePath();
         ctx.fill();
         ctx.restore();
 
-        angle += 0.04;
-        requestAnimationFrame(drawRadar);
+        // Điểm chớp
+        dots.forEach(d => {
+            const da = ((d.angle - angle) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+            if (da < 0.25) d.alpha = 1;
+            else d.alpha = Math.max(0, d.alpha - 0.02);
+
+            if (d.alpha > 0.05) {
+                const px = cx + Math.cos(d.angle) * R * d.dist;
+                const py = cy + Math.sin(d.angle) * R * d.dist;
+                ctx.beginPath();
+                ctx.arc(px, py, 4, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(57,255,20,${d.alpha})`;
+                ctx.fill();
+            }
+        });
+
+        // Text
+        ctx.fillStyle = 'rgba(0,242,254,0.4)';
+        ctx.font = '13px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('AETHER-EYE — CHỜ KẾT NỐI CAMERA', cx, canvas.height - 16);
+
+        angle += 0.025;
+        requestAnimationFrame(draw);
     }
-    drawRadar();
+
+    draw();
 }
