@@ -761,19 +761,25 @@ function toggleFlash() {
         if (streamMode === 'local') {
             fetch(`http://${ipInput.value}/control?var=flash&val=${val}`);
         } else if (wsClient) {
-            // Tạm dừng stream để tránh nghẽn socket của ESP32-CAM khi đang gửi ảnh nhị phân liên tục
-            wsClient.send('stop_stream');
-            
-            setTimeout(() => {
-                // Gửi cả 2 định dạng lệnh để đảm bảo tương thích
-                wsClient.send(`control:flash:${val}`);
-                wsClient.send(flashState ? 'flash_on' : 'flash_off');
+            if (isStreamingActive) {
+                // Tạm dừng stream để tránh nghẽn socket của ESP32-CAM khi đang gửi ảnh nhị phân liên tục
+                wsClient.send('stop_stream');
                 
                 setTimeout(() => {
-                    // Tiếp tục stream lại
-                    wsClient.send('start_stream');
+                    // Gửi cả 2 định dạng lệnh để đảm bảo tương thích
+                    wsClient.send(`control:flash:${val}`);
+                    wsClient.send(flashState ? 'flash_on' : 'flash_off');
+                    
+                    setTimeout(() => {
+                        // Tiếp tục stream lại
+                        wsClient.send('start_stream');
+                    }, 1000);
                 }, 1000);
-            }, 1000);
+            } else {
+                // Nếu luồng đang dừng sẵn, gửi lệnh trực tiếp mà không cần chờ đợi trì hoãn
+                wsClient.send(`control:flash:${val}`);
+                wsClient.send(flashState ? 'flash_on' : 'flash_off');
+            }
         }
     }
 }
@@ -795,13 +801,17 @@ function changeResolution(val) {
         if (streamMode === 'local') {
             fetch(`http://${ipInput.value}/control?var=framesize&val=${val}`);
         } else if (wsClient) {
-            wsClient.send('stop_stream');
-            setTimeout(() => {
-                wsClient.send(`control:framesize:${val}`);
+            if (isStreamingActive) {
+                wsClient.send('stop_stream');
                 setTimeout(() => {
-                    wsClient.send('start_stream');
+                    wsClient.send(`control:framesize:${val}`);
+                    setTimeout(() => {
+                        wsClient.send('start_stream');
+                    }, 1000);
                 }, 1000);
-            }, 1000);
+            } else {
+                wsClient.send(`control:framesize:${val}`);
+            }
         }
     }
     
@@ -828,13 +838,17 @@ function updateCamSetting(variable, val) {
         if (streamMode === 'local') {
             fetch(`http://${ipInput.value}/control?var=${variable}&val=${val}`);
         } else if (wsClient) {
-            wsClient.send('stop_stream');
-            setTimeout(() => {
-                wsClient.send(`control:${variable}:${val}`);
+            if (isStreamingActive) {
+                wsClient.send('stop_stream');
                 setTimeout(() => {
-                    wsClient.send('start_stream');
+                    wsClient.send(`control:${variable}:${val}`);
+                    setTimeout(() => {
+                        wsClient.send('start_stream');
+                    }, 1000);
                 }, 1000);
-            }, 1000);
+            } else {
+                wsClient.send(`control:${variable}:${val}`);
+            }
         }
     }
 }

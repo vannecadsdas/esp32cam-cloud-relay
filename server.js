@@ -90,10 +90,8 @@ wssClients.on('connection', (ws) => {
         camera: cameraSocket ? 'online' : 'offline'
     }));
 
-    // Nếu camera đã kết nối, ra lệnh bắt đầu stream ngay
-    if (cameraSocket) {
-        cameraSocket.send('start_stream');
-    }
+    // Không tự động phát luồng khi kết nối để tránh nghẽn mạng từ xa qua Cloud.
+    // Client sẽ tự nhấn nút "Phát Luồng" để bắt đầu luồng ảnh khi cần thiết.
 
     ws.on('message', (message) => {
         const command = message.toString().trim();
