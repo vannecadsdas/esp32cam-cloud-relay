@@ -55,7 +55,7 @@ wssCamera.on('connection', (ws) => {
             broadcastToClients(message, true);
         } else {
             // Nhận lệnh text từ camera (ví dụ báo cáo trạng thái)
-            const textMsg = message.toString();
+            const textMsg = message.toString().trim();
             console.log('[Camera -> Server]:', textMsg);
             broadcastToClients(textMsg);
         }
@@ -63,13 +63,17 @@ wssCamera.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('[Camera] ESP32-CAM đã ngắt kết nối.');
-        cameraSocket = null;
+        if (cameraSocket === ws) {
+            cameraSocket = null;
+        }
         broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
     });
 
     ws.on('error', (error) => {
         console.error('[Camera] Lỗi socket:', error);
-        cameraSocket = null;
+        if (cameraSocket === ws) {
+            cameraSocket = null;
+        }
     });
 });
 
@@ -92,11 +96,11 @@ wssClients.on('connection', (ws) => {
     }
 
     ws.on('message', (message) => {
-        const command = message.toString();
+        const command = message.toString().trim();
         console.log('[Client -> Camera]:', command);
 
-        // Chuyển tiếp lệnh từ Client trực tiếp tới ESP32-CAM
-        if (cameraSocket && cameraSocket.readyState === cameraSocket.OPEN) {
+        // Chuyển tiếp lệnh từ Client trực tiếp tới ESP32-CAM (readyState 1 là OPEN)
+        if (cameraSocket && cameraSocket.readyState === 1) {
             cameraSocket.send(command);
         }
     });
@@ -105,8 +109,8 @@ wssClients.on('connection', (ws) => {
         clientSockets.delete(ws);
         console.log(`[Client] Người xem thoát. Tổng số người xem: ${clientSockets.size}`);
 
-        // Tiết kiệm băng thông: Nếu không còn ai xem nữa, ra lệnh cho ESP32-CAM dừng stream
-        if (clientSockets.size === 0 && cameraSocket && cameraSocket.readyState === cameraSocket.OPEN) {
+        // Tiết kiệm băng thông: Nếu không còn ai xem nữa, ra lệnh cho ESP32-CAM dừng stream (readyState 1 là OPEN)
+        if (clientSockets.size === 0 && cameraSocket && cameraSocket.readyState === 1) {
             console.log('[Server] Không còn ai xem. Ra lệnh ESP32-CAM tạm dừng camera để mát chip.');
             cameraSocket.send('stop_stream');
         }
@@ -121,7 +125,7 @@ wssClients.on('connection', (ws) => {
 // Chuyển tiếp dữ liệu đến toàn bộ Client trình duyệt
 function broadcastToClients(data, isBinary = false) {
     clientSockets.forEach((client) => {
-        if (client.readyState === client.OPEN) {
+        if (client.readyState === 1) {
             client.send(data, { binary: isBinary });
         }
     });
