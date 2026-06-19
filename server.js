@@ -38,6 +38,8 @@ const wssCamera = new WebSocketServer({ noServer: true });
 const wssClients = new WebSocketServer({ noServer: true });
 
 let cameraSocket = null;
+let cameraReadyAt = 0;  // Timestamp khi camera ổn định và sẵn sàng nhận lệnh
+const CAMERA_STABILIZE_MS = 5000; // 5 giây chờ sau khi camera kết nối
 const clientSockets = new Set();
 
 // ==========================================================================
@@ -46,6 +48,7 @@ const clientSockets = new Set();
 wssCamera.on('connection', (ws) => {
     console.log('[Camera] Kết nối mới từ ESP32-CAM!');
     cameraSocket = ws;
+    cameraReadyAt = Date.now() + CAMERA_STABILIZE_MS; // Chặn lệnh 5 giây đầu
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     
@@ -64,18 +67,20 @@ wssCamera.on('connection', (ws) => {
         }
     });
 
-    ws.on('close', () => {
-        console.log('[Camera] ESP32-CAM đã ngắt kết nối.');
+    ws.on('close', (code, reason) => {
+        console.log(`[Camera] ESP32-CAM đã ngắt kết nối. Code: ${code}, Reason: ${reason || 'none'}`);
         if (cameraSocket === ws) {
             cameraSocket = null;
+            cameraReadyAt = 0;
         }
         broadcastToClients(JSON.stringify({ type: 'status', camera: 'offline' }));
     });
 
     ws.on('error', (error) => {
-        console.error('[Camera] Lỗi socket:', error);
+        console.error('[Camera] Lỗi socket:', error.message);
         if (cameraSocket === ws) {
             cameraSocket = null;
+            cameraReadyAt = 0;
         }
     });
 });
@@ -103,23 +108,30 @@ wssClients.on('connection', (ws) => {
         console.log(`[Client -> Server] Nhận lệnh '${command}' từ Client`);
 
         if (!cameraSocket) {
-            console.log(`[Server -> Camera] KHÔNG THỂ chuyển tiếp lệnh '${command}': cameraSocket đang NULL (Camera chưa kết nối hoặc mất kết nối).`);
+            console.log(`[Server] KHÔNG THỂ chuyển tiếp '${command}': camera chưa kết nối.`);
             return;
         }
 
-        console.log(`[Server -> Camera] Trạng thái cameraSocket.readyState: ${cameraSocket.readyState} (1 là OPEN)`);
+        // Chặn lệnh trong 5 giây đầu sau khi camera kết nối để tránh crash
+        const now = Date.now();
+        if (now < cameraReadyAt) {
+            const waitMs = cameraReadyAt - now;
+            console.log(`[Server] Chặn lệnh '${command}': camera đang ổn định, còn ${waitMs}ms.`);
+            return;
+        }
+
+        console.log(`[Server -> Camera] readyState: ${cameraSocket.readyState}, gửi: '${command}'`);
         
         if (cameraSocket.readyState === 1) {
-            console.log(`[Server -> Camera] Đang gửi lệnh '${command}' tới Camera...`);
             cameraSocket.send(command + '\0', (err) => {
                 if (err) {
-                    console.error(`[Server -> Camera] Gửi lệnh '${command}' THẤT BẠI:`, err);
+                    console.error(`[Server -> Camera] Gửi '${command}' THẤT BẠI:`, err);
                 } else {
-                    console.log(`[Server -> Camera] Đã gửi lệnh '${command}' THÀNH CÔNG.`);
+                    console.log(`[Server -> Camera] Đã gửi '${command}' THÀNH CÔNG.`);
                 }
             });
         } else {
-            console.log(`[Server -> Camera] KHÔNG THỂ gửi lệnh '${command}': readyState của cameraSocket là ${cameraSocket.readyState} (không phải OPEN).`);
+            console.log(`[Server -> Camera] KHÔNG GỬI: readyState = ${cameraSocket.readyState}`);
         }
     });
 
