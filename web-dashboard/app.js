@@ -7,6 +7,7 @@ let wsClient = null;
 let streamInterval = null;
 let fpsInterval = null;
 let flashState = false;
+let isStreamingActive = true;
 
 // Mock mode simulation variables
 let mockAnimationId = null;
@@ -196,6 +197,14 @@ function disconnectFromCamera() {
     // Return to mock simulation
     initMockCamera();
     videoLoader.style.display = 'none';
+    
+    // Reset stream toggle button state
+    isStreamingActive = true;
+    const streamToggleBtn = document.getElementById('btn-stream-toggle');
+    if (streamToggleBtn) {
+        streamToggleBtn.innerHTML = '<i class="fa-solid fa-pause"></i> Dừng Phát';
+        streamToggleBtn.classList.remove('paused');
+    }
 }
 
 // Local stream connection (LAN)
@@ -857,4 +866,29 @@ function openLightbox(src, caption) {
 
 function closeLightbox() {
     document.getElementById('lightbox').style.display = "none";
+}
+
+function toggleStreamState() {
+    if (!isConnected) return;
+    
+    isStreamingActive = !isStreamingActive;
+    const btn = document.getElementById('btn-stream-toggle');
+    
+    if (isStreamingActive) {
+        btn.innerHTML = '<i class="fa-solid fa-pause"></i> Dừng Phát';
+        btn.classList.remove('paused');
+        if (streamMode === 'cloud' && wsClient) {
+            wsClient.send('start_stream');
+        } else if (streamMode === 'local') {
+            cameraStream.src = `http://${ipInput.value}/stream`;
+        }
+    } else {
+        btn.innerHTML = '<i class="fa-solid fa-play"></i> Phát Luồng';
+        btn.classList.add('paused');
+        if (streamMode === 'cloud' && wsClient) {
+            wsClient.send('stop_stream');
+        } else if (streamMode === 'local') {
+            cameraStream.src = '';
+        }
+    }
 }
