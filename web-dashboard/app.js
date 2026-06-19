@@ -265,8 +265,13 @@ function connectCloud(domain) {
             videoLoader.style.display = 'none';
             cameraStream.style.display = 'block';
             
-            // Send command to cloud to start stream from camera
-            wsClient.send('start_stream');
+            // Không tự động phát luồng khi kết nối để tránh nghẽn lệnh trên ESP32-CAM
+            isStreamingActive = false;
+            const streamToggleBtn = document.getElementById('btn-stream-toggle');
+            if (streamToggleBtn) {
+                streamToggleBtn.innerHTML = '<i class="fa-solid fa-play"></i> Phát Luồng';
+                streamToggleBtn.classList.add('paused');
+            }
             
             startFpsCounter();
         };
